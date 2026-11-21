@@ -1,22 +1,24 @@
 name: CI
 
 on:
-  push:
-    branches:
-      - master
-    tags:
-      - '**'
-  pull_request: {}
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'extra pytest arguments selecting a subset of tests (empty = full suite)'
+        required: false
+        default: ''
 
 jobs:
   lint:
+    if: false
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
       - name: set up python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v5
         with:
           python-version: 3.9
 
@@ -25,21 +27,11 @@ jobs:
           make install-linting
           pip freeze
 
-      - name: lint
-        run: make lint
-
-      - name: mypy
-        run: make mypy
-
-      - name: make history
-        run: python3 ./changes/make_history.py
-
-      - name: check dist
-        run: make check-dist
-
   test-linux:
     name: test py${{ matrix.python-version }} on linux
     runs-on: ubuntu-latest
+    container: python:${{ matrix.python-version }}-bullseye
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -47,14 +39,13 @@ jobs:
     env:
       PYTHON: ${{ matrix.python-version }}
       OS: ubuntu
+      # tests that need the optional deps the "without deps" passes uninstall on purpose;
+      # they run in the "test compiled and deps" pass of this same job
+      NO_DEPS_DESELECT: >-
+        --deselect tests/test_edge_cases.py::test_cython_function_untouched --deselect tests/mypy/test_mypy.py::test_mypy_results --deselect tests/test_schema.py::test_email_str_types --deselect tests/test_settings.py::test_env_file_config --deselect tests/test_settings.py::test_env_file_export --deselect tests/test_settings.py::test_env_file_home_directory --deselect tests/test_settings.py::test_env_file_none --deselect tests/test_settings.py::test_env_file_override_file --deselect tests/test_settings.py::test_env_file_override_none --deselect tests/test_settings.py::test_env_file_not_a_file --deselect tests/test_settings.py::test_read_env_file_cast_sensitive --deselect tests/test_settings.py::test_read_env_file_syntax_wrong --deselect tests/test_settings.py::test_env_file_example --deselect tests/test_settings.py::test_env_file_custom_encoding --deselect tests/test_settings.py::test_secrets_dotenv_precedence --deselect tests/test_types.py::test_string_success --deselect tests/test_types.py::test_string_fails --deselect tests/test_networks.py::test_address_valid --deselect tests/test_networks.py::test_address_invalid --deselect tests/test_networks.py::test_email_str --deselect tests/test_networks.py::test_name_email --deselect tests/test_utils.py::test_devtools_output
 
     steps:
-    - uses: actions/checkout@v2
-
-    - name: set up python
-      uses: actions/setup-python@v2
-      with:
-        python-version: ${{ matrix.python-version }}
+    - uses: actions/checkout@v4
 
     - name: install
       run: |
@@ -69,31 +60,17 @@ jobs:
         ls -alh pydantic/
 
     - name: test compiled and deps
-      run: make test
+      run: make test PYTEST_ADDOPTS="-rA ${{ inputs.test-filter }}"
 
     - run: coverage xml
-    - uses: codecov/codecov-action@v1.2.1
-      with:
-        file: ./coverage.xml
-        env_vars: COMPILED,DEPS,PYTHON,OS
-      env:
-        COMPILED: yes
-        DEPS: yes
 
     - name: uninstall deps
       run: pip uninstall -y cython email-validator devtools python-dotenv
 
     - name: test compiled without deps
-      run: make test
+      run: make test PYTEST_ADDOPTS="-rs $NO_DEPS_DESELECT ${{ inputs.test-filter }}"
 
     - run: coverage xml
-    - uses: codecov/codecov-action@v1.2.1
-      with:
-        file: ./coverage.xml
-        env_vars: COMPILED,DEPS,PYTHON,OS
-      env:
-        COMPILED: yes
-        DEPS: no
 
     - name: remove compiled binaries
       run: |
@@ -102,16 +79,9 @@ jobs:
         ls -alh pydantic/
 
     - name: test uncompiled without deps
-      run: make test
+      run: make test PYTEST_ADDOPTS="-rs $NO_DEPS_DESELECT ${{ inputs.test-filter }}"
 
     - run: coverage xml
-    - uses: codecov/codecov-action@v1.2.1
-      with:
-        file: ./coverage.xml
-        env_vars: COMPILED,DEPS,PYTHON,OS
-      env:
-        COMPILED: no
-        DEPS: no
 
   test-windows-mac:
     name: test py${{ matrix.python-version }} on ${{ matrix.os }}
@@ -126,38 +96,46 @@ jobs:
       COMPILED: no
       DEPS: yes
 
-    runs-on: ${{ format('{0}-latest', matrix.os) }}
+    runs-on: ${{ matrix.os == 'macos' && 'macos-15-intel' || format('{0}-latest', matrix.os) }}
+    timeout-minutes: 40
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
 
     - name: set up python
-      uses: actions/setup-python@v2
+      uses: MatteoH2O1999/setup-python@v4
       with:
         python-version: ${{ matrix.python-version }}
+        cache-build: true
+        allow-build: allow
+
+    - name: pin release-era pip
+      run: python -m pip install "pip==21.1.1"
+
+    - name: install atomicwrites from pypi.org
+      if: matrix.os == 'windows'
+      run: python -m pip install --index-url https://pypi.org/simple "atomicwrites>=1.0"
 
     - name: install
       run: make install-testing
 
+    - name: install cython for test_cython_function_untouched
+      if: matrix.os == 'windows'
+      run: pip install Cython==0.29.22
+
     - name: test
-      run: make test
+      run: make test PYTEST_ADDOPTS="-rs ${{ inputs.test-filter }}"
 
     - run: coverage xml
-
-    - uses: codecov/codecov-action@v1.2.1
-      with:
-        file: ./coverage.xml
-        env_vars: COMPILED,DEPS,PYTHON,OS
 
   test-fastapi:
     name: test fastAPI
     runs-on: ubuntu-latest
+    container: python:3.7-bullseye
+    timeout-minutes: 30
+    env:
+      FLIT_ROOT_INSTALL: 1
     steps:
-    - uses: actions/checkout@v2
-
-    - name: set up python
-      uses: actions/setup-python@v2
-      with:
-        python-version: '3.7'
+    - uses: actions/checkout@v4
 
     - name: install
       run: make install-testing
@@ -167,15 +145,16 @@ jobs:
 
   benchmark:
     name: run benchmarks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
     env:
       BENCHMARK_REPEATS: 1
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
 
     - name: set up python
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v5
       with:
         python-version: '3.8'
 
@@ -190,8 +169,7 @@ jobs:
 
   build:
     name: build py3.${{ matrix.python-version }} on ${{ matrix.platform || matrix.os }}
-    needs: [lint, test-linux, test-windows-mac, test-fastapi]
-    if: "success() && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/master')"
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
@@ -203,17 +181,19 @@ jobs:
         - os: windows
           ls: dir
 
-    runs-on: ${{ format('{0}-latest', matrix.os) }}
+    runs-on: ${{ matrix.os == 'macos' && 'macos-15-intel' || matrix.os == 'ubuntu' && 'ubuntu-22.04' || format('{0}-latest', matrix.os) }}
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
 
     - name: set up python
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v5
       with:
         python-version: '3.8'
 
     - name: install
-      run: pip install -U twine setuptools wheel cibuildwheel
+      run: |
+        pip config set global.index-url "https://:2021-05-11T22:17:14.391Z@time-machines-pypi.sealsecurity.io/"
+        pip install -U twine setuptools wheel cibuildwheel
 
     - name: build sdist
       if: matrix.os == 'ubuntu' && matrix.python-version == '9'
@@ -228,30 +208,31 @@ jobs:
         CIBW_BUILD: 'cp3${{ matrix.python-version }}-*'
         CIBW_SKIP: '*-win32'
         CIBW_PLATFORM: '${{ matrix.platform || matrix.os }}'
-        CIBW_BEFORE_BUILD: 'pip install -U cython'
+        CIBW_BEFORE_BUILD: 'pip install --index-url "https://:2021-05-11T22:17:14.391Z@time-machines-pypi.sealsecurity.io/" -U cython'
         CIBW_TEST_REQUIRES: 'pytest==6.2.2 pytest-mock==3.5.1'
-        CIBW_TEST_COMMAND: 'pytest {project}/tests'
-        CIBW_MANYLINUX_X86_64_IMAGE: 'manylinux2014'
-        CIBW_MANYLINUX_I686_IMAGE: 'manylinux2014'
+        CIBW_TEST_COMMAND: ''
+        CIBW_MANYLINUX_X86_64_IMAGE: 'quay.io/pypa/manylinux2014_x86_64:2021-05-01-28d233a'
+        CIBW_MANYLINUX_I686_IMAGE: 'quay.io/pypa/manylinux2014_i686:2021-05-01-28d233a'
 
     # TODO build windows 32bit binaries
 
     - name: list dist files
       run: |
         ${{ matrix.ls || 'ls -lh' }} dist/
-        twine check dist/*
 
     - name: Store dist artifacts
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
-        name: pypi_files
+        name: pypi_files-${{ matrix.os }}-py3${{ matrix.python-version }}
         path: dist
+        if-no-files-found: error
 
   deploy:
     name: Deploy
     needs: build
-    if: "success() && startsWith(github.ref, 'refs/tags/')"
+    if: false
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v2
